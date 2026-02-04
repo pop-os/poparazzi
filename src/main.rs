@@ -1,3 +1,364 @@
-fn main() {
-    println!("Hello, world!");
+use anyhow::{Context, Result, anyhow};
+use futures_util::TryStreamExt;
+use html_escape::encode_text;
+use octocrab::Octocrab;
+use std::{collections::BTreeMap, fmt::Write as _, fs, io::Write};
+use tokio::pin;
+use url::Url;
+
+mod apt;
+use self::apt::AptRepo;
+mod config;
+use self::config::*;
+
+#[derive(Clone, Debug)]
+pub struct AptVersion {
+    repo_kind: RepoKind,
+    suite: Suite,
+    component: String,
+    version: String,
+    directory: Option<String>,
+    errors: Vec<&'static str>,
+}
+
+impl AptVersion {
+    fn github_commit(&self) -> Option<String> {
+        let directory = self.directory.as_ref()?;
+        let mut parts = directory.split('/');
+        assert_eq!(parts.next()?, "pool");
+        let _codename = parts.next()?;
+        let repo = parts.next()?;
+        let commit = parts.next()?;
+        Some(format!("https://github.com/pop-os/{repo}/commit/{commit}"))
+    }
+
+    fn html_cell<W: Write>(&self, html: &mut W, package: &str) -> Result<()> {
+        if self.errors.is_empty() {
+            writeln!(html, "<td>",)?;
+        } else {
+            writeln!(html, "<td class='error'>",)?;
+        }
+        let url_opt = match self.repo_kind {
+            RepoKind::Ubuntu => Some(format!(
+                "https://launchpad.net/ubuntu/+source/{}/{}",
+                package, self.version
+            )),
+            _ => self.github_commit(),
+        };
+        if let Some(url) = url_opt {
+            writeln!(html, "<a href='{url}'>{}</a>", encode_text(&self.version))?;
+        } else {
+            writeln!(html, "{}", encode_text(&self.version))?;
+        }
+        for error in self.errors.iter() {
+            writeln!(html, "<br/>{}", encode_text(error))?;
+        }
+        writeln!(html, "</td>")?;
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AptInfo {
+    release: Option<AptVersion>,
+    staging: Option<AptVersion>,
+    ubuntu: Option<AptVersion>,
+}
+
+// Uses a BTreeMap so it stays sorted
+type AptInfos = BTreeMap<(String, Codename), AptInfo>;
+
+async fn apt_infos() -> Result<AptInfos> {
+    log::info!("fetching repository data in parallel");
+    let mut release_tasks = Vec::new();
+    for repo_kind in RepoKind::all() {
+        let repo = AptRepo::new(repo_kind.url());
+        let mut repo_tasks = Vec::new();
+        for codename in repo_kind.codenames() {
+            for suite in repo_kind.suites(*codename) {
+                repo_tasks.push((codename, suite, {
+                    let repo = repo.clone();
+                    tokio::spawn(async move { repo.release(&suite.to_string()).await })
+                }));
+            }
+        }
+        release_tasks.push((repo_kind, repo_tasks));
+    }
+
+    let mut tasks = Vec::new();
+    for (repo_kind, release_repo_tasks) in release_tasks {
+        let repo = AptRepo::new(repo_kind.url());
+        let mut repo_tasks = Vec::new();
+        for (codename, suite, release_task) in release_repo_tasks {
+            let mut suite_tasks = Vec::new();
+            let releases = release_task.await??;
+            assert_eq!(releases.len(), 1);
+            for release in releases {
+                for component in release
+                    .components
+                    .as_ref()
+                    .ok_or(anyhow!("release missing components"))?
+                {
+                    let sources_task = {
+                        let repo = repo.clone();
+                        let component = component.clone();
+                        tokio::spawn(
+                            async move { repo.sources(&suite.to_string(), &component).await },
+                        )
+                    };
+
+                    let mut arch_tasks = Vec::new();
+                    for arch in release
+                        .archs
+                        .as_ref()
+                        .ok_or(anyhow!("release missing archs"))?
+                    {
+                        let mut allowed = false;
+                        for allowed_arch in repo_kind.allowed_archs() {
+                            if arch == allowed_arch.as_str() {
+                                allowed = true;
+                                break;
+                            }
+                        }
+                        if !allowed {
+                            continue;
+                        }
+
+                        //TODO: use Packages data (slower)
+                        if false {
+                            arch_tasks.push((arch.clone(), {
+                                let repo = repo.clone();
+                                let component = component.clone();
+                                let arch = arch.clone();
+                                tokio::spawn(async move {
+                                    repo.packages(&suite.to_string(), &component, &arch).await
+                                })
+                            }));
+                        }
+                    }
+
+                    suite_tasks.push((component.clone(), sources_task, arch_tasks));
+                }
+            }
+            repo_tasks.push((codename, suite, suite_tasks));
+        }
+        tasks.push((repo_kind, repo_tasks));
+    }
+
+    let mut apt_infos = AptInfos::new();
+    for (repo_kind, repo_tasks) in tasks {
+        println!("{:?}", repo_kind);
+        for (codename, suite, suite_tasks) in repo_tasks {
+            println!("\t{}", suite);
+            for (component, sources_task, arch_tasks) in suite_tasks {
+                let sources = sources_task.await??;
+                println!("\t\t{}: {} sources", component, sources.len());
+                for source in sources {
+                    let Some(package) = source.package else {
+                        continue;
+                    };
+                    let Some(version) = source.version else {
+                        continue;
+                    };
+                    let apt_version = || {
+                        AptVersion {
+                            repo_kind,
+                            suite,
+                            //TODO: do not clone component
+                            component: component.clone(),
+                            version: version.clone(),
+                            directory: source.directory.clone(),
+                            errors: Vec::new(),
+                        }
+                    };
+                    let entry = apt_infos.entry((package, *codename));
+                    match repo_kind {
+                        RepoKind::Release => {
+                            let apt_info = entry.or_default();
+                            assert!(apt_info.release.is_none());
+                            apt_info.release = Some(apt_version());
+                        }
+                        RepoKind::Staging => {
+                            let apt_info = entry.or_default();
+                            assert!(apt_info.staging.is_none());
+                            apt_info.staging = Some(apt_version());
+                        }
+                        RepoKind::Ubuntu => {
+                            // Only insert Ubuntu versions if a Pop version is found
+                            entry.and_modify(|apt_info| match &apt_info.ubuntu {
+                                Some(last) => {
+                                    if let std::cmp::Ordering::Greater =
+                                        deb_version::compare_versions(&version, &last.version)
+                                    {
+                                        apt_info.ubuntu = Some(apt_version());
+                                    }
+                                }
+                                None => {
+                                    apt_info.ubuntu = Some(apt_version());
+                                }
+                            });
+                        }
+                    }
+                }
+                for (arch, packages_task) in arch_tasks {
+                    let packages = packages_task.await??;
+                    if !packages.is_empty() {
+                        println!("\t\t{}/{}: {} packages", component, arch, packages.len());
+                    }
+                }
+            }
+        }
+    }
+
+    // Calculate errors
+    for ((package, codename), apt_info) in apt_infos.iter_mut() {
+        if let Some(release) = &mut apt_info.release {
+            if apt_info.staging.is_none() {
+                release.errors.push("In release but not staging");
+            }
+            if let Some(ubuntu) = &apt_info.ubuntu {
+                if let std::cmp::Ordering::Greater =
+                    deb_version::compare_versions(&ubuntu.version, &release.version)
+                {
+                    release.errors.push("Older than Ubuntu");
+                }
+            }
+        }
+        if let Some(staging) = &mut apt_info.staging {
+            if let Some(release) = &apt_info.release {
+                if let std::cmp::Ordering::Greater =
+                    deb_version::compare_versions(&release.version, &staging.version)
+                {
+                    staging.errors.push("Older than release");
+                }
+            }
+            if let Some(ubuntu) = &apt_info.ubuntu {
+                if let std::cmp::Ordering::Greater =
+                    deb_version::compare_versions(&ubuntu.version, &staging.version)
+                {
+                    staging.errors.push("Older than Ubuntu");
+                }
+            }
+        }
+    }
+
+    Ok(apt_infos)
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    let mut html = fs::File::create("index.html")?;
+    writeln!(
+        html,
+        "{}",
+        r#"<!DOCTYPE html>
+<html lang='en'>
+<head>
+<meta charset='utf-8'>
+<meta name='viewport' content='width=device-width'>
+<title>Poparazzi</title>
+<script src='https://code.jquery.com/jquery-4.0.0.min.js' integrity='sha256-OaVG6prZf4v69dPg6PhVattBXkcOWQB62pdZ3ORyrao=' crossorigin='anonymous'></script>
+<link rel='stylesheet' type='text/css' href='https://cdn.datatables.net/2.3.7/css/dataTables.dataTables.min.css'>
+<link rel='stylesheet' type='text/css' href='https://cdn.datatables.net/responsive/3.0.8/css/responsive.dataTables.min.css'>
+<script type='text/javascript' src='https://cdn.datatables.net/2.3.7/js/dataTables.min.js'></script>
+<script type='text/javascript' src='https://cdn.datatables.net/responsive/3.0.8/js/dataTables.responsive.min.js'></script>
+<style>
+td.error {
+    background-color: #800000
+}
+</style>
+<script type='text/javascript'>
+function onload(){
+    new DataTable('#table', {
+        order: [
+            [0, 'desc'],
+            [1, 'asc'],
+            [2, 'asc']
+        ],
+        paging: false,
+        responsive: true
+    });
+}
+</script>
+</head>
+<body onload='onload()'>"#
+    )?;
+
+    let apt_infos = apt_infos().await?;
+    writeln!(html, "<table id='table' class='display compact'>")?;
+    writeln!(html, "<thead>")?;
+    writeln!(html, "<tr>")?;
+    writeln!(html, "<th>Errors</th>")?;
+    writeln!(html, "<th>Source</th>")?;
+    writeln!(html, "<th>Codename</th>")?;
+    writeln!(html, "<th>Release</th>")?;
+    writeln!(html, "<th>Staging</th>")?;
+    writeln!(html, "<th>Ubuntu</th>")?;
+    writeln!(html, "</tr>")?;
+    writeln!(html, "</thead>")?;
+    writeln!(html, "<tbody>")?;
+    for ((package, codename), apt_info) in apt_infos.iter() {
+        writeln!(html, "<tr>")?;
+        let mut errors = 0;
+        for version_opt in &[&apt_info.release, &apt_info.staging, &apt_info.ubuntu] {
+            if let Some(version) = version_opt {
+                errors += version.errors.len();
+            }
+        }
+        if errors > 0 {
+            writeln!(html, "<td class='error'>{}</td>", errors)?;
+        } else {
+            writeln!(html, "<td>{}</td>", errors)?;
+        }
+        writeln!(html, "<td>{}</td>", encode_text(&package))?;
+        writeln!(html, "<td>{}</td>", encode_text(codename.as_str()))?;
+        for version_opt in &[&apt_info.release, &apt_info.staging, &apt_info.ubuntu] {
+            if let Some(version) = version_opt {
+                version.html_cell(&mut html, package)?;
+            } else {
+                writeln!(html, "<td>None</td>",)?;
+            }
+        }
+        writeln!(html, "</tr>")?;
+    }
+    writeln!(html, "</tbody>")?;
+    writeln!(html, "</table>")?;
+
+    writeln!(
+        html,
+        r#"</body>
+</html>"#
+    )?;
+
+    /*
+    let token =
+        fs::read_to_string(".github_token").context("Put your Github token in .github_token")?;
+    let token = token.trim();
+    let octocrab = Octocrab::builder().personal_token(token).build()?;
+
+    let mut repos = Vec::new();
+    {
+        log::info!("retrieving github repositories");
+        let stream = octocrab
+            .orgs(GITHUB_ORG)
+            .list_repos()
+            .repo_type(octocrab::params::repos::Type::Public)
+            .send()
+            .await?
+            .into_stream(&octocrab);
+        pin!(stream);
+        while let Some(repo) = stream.try_next().await? {
+            repos.push(Repository { name: repo.name });
+        }
+        repos.sort_by_key(|repo| repo.name.clone());
+    }
+
+    for repo in repos.iter() {
+        println!("{:?}", repo);
+    }
+    */
+
+    Ok(())
 }
