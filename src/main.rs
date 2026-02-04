@@ -386,6 +386,7 @@ function onload(){
     writeln!(html, "</tr>")?;
     writeln!(html, "</thead>")?;
     writeln!(html, "<tbody>")?;
+    let mut total_errors = 0;
     for ((package, codename), apt_info) in apt_infos.iter() {
         writeln!(html, "<tr>")?;
         let mut errors = 0;
@@ -399,6 +400,7 @@ function onload(){
         } else {
             writeln!(html, "<td>{}</td>", errors)?;
         }
+        total_errors += errors;
         writeln!(html, "<td>{}</td>", encode_text(&package))?;
         writeln!(html, "<td>{}</td>", encode_text(codename.as_str()))?;
         for repo_kind in RepoKind::all() {
@@ -418,6 +420,12 @@ function onload(){
         r#"</body>
 </html>"#
     )?;
+
+    if total_errors > 0 {
+        log::warn!("finished with {} errors", total_errors);
+    } else {
+        log::info!("finished without errors");
+    }
 
     Ok(())
 }
