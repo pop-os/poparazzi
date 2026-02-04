@@ -1,10 +1,7 @@
 use anyhow::{Context, Result, anyhow};
-use futures_util::TryStreamExt;
 use html_escape::encode_text;
 use octocrab::Octocrab;
-use std::{collections::BTreeMap, fmt::Write as _, fs, io::Write};
-use tokio::pin;
-use url::Url;
+use std::{cell::RefCell, collections::BTreeMap, fmt::Write as _, fs, io::Write};
 
 mod apt;
 use self::apt::AptRepo;
@@ -14,11 +11,10 @@ use self::config::*;
 #[derive(Clone, Debug)]
 pub struct AptVersion {
     repo_kind: RepoKind,
-    suite: Suite,
-    component: String,
+    codename: Codename,
     version: String,
     directory: Option<String>,
-    errors: Vec<&'static str>,
+    errors: RefCell<Vec<String>>,
 }
 
 impl AptVersion {
@@ -35,12 +31,23 @@ impl AptVersion {
     }
 
     fn html_cell<W: Write>(&self, html: &mut W, package: &str) -> Result<()> {
-        if self.errors.is_empty() {
+        let errors = self.errors.borrow();
+        if errors.is_empty() {
             writeln!(html, "<td>",)?;
         } else {
             writeln!(html, "<td class='error'>",)?;
         }
         let url_opt = match self.repo_kind {
+            RepoKind::Stable => Some(format!(
+                "https://launchpad.net/~system76-dev/+archive/ubuntu/stable/+packages?field.name_filter={}&field.status_filter=published&field.series_filter={}",
+                urlencoding::encode(package),
+                urlencoding::encode(self.codename.as_str())
+            )),
+            RepoKind::PreStable => Some(format!(
+                "https://launchpad.net/~system76-dev/+archive/ubuntu/pre-stable/+packages?field.name_filter={}&field.status_filter=published&field.series_filter={}",
+                urlencoding::encode(package),
+                urlencoding::encode(self.codename.as_str())
+            )),
             RepoKind::Ubuntu => Some(format!(
                 "https://launchpad.net/ubuntu/+source/{}/{}",
                 package, self.version
@@ -52,7 +59,7 @@ impl AptVersion {
         } else {
             writeln!(html, "{}", encode_text(&self.version))?;
         }
-        for error in self.errors.iter() {
+        for error in errors.iter() {
             writeln!(html, "<br/>{}", encode_text(error))?;
         }
         writeln!(html, "</td>")?;
@@ -64,7 +71,34 @@ impl AptVersion {
 pub struct AptInfo {
     release: Option<AptVersion>,
     staging: Option<AptVersion>,
+    staging_ubuntu: Option<AptVersion>,
+    stable: Option<AptVersion>,
+    pre_stable: Option<AptVersion>,
     ubuntu: Option<AptVersion>,
+}
+
+impl AptInfo {
+    pub fn version(&self, repo_kind: RepoKind) -> &Option<AptVersion> {
+        match repo_kind {
+            RepoKind::Release => &self.release,
+            RepoKind::Staging => &self.staging,
+            RepoKind::StagingUbuntu => &self.staging_ubuntu,
+            RepoKind::Stable => &self.stable,
+            RepoKind::PreStable => &self.pre_stable,
+            RepoKind::Ubuntu => &self.ubuntu,
+        }
+    }
+
+    pub fn version_mut(&mut self, repo_kind: RepoKind) -> &mut Option<AptVersion> {
+        match repo_kind {
+            RepoKind::Release => &mut self.release,
+            RepoKind::Staging => &mut self.staging,
+            RepoKind::StagingUbuntu => &mut self.staging_ubuntu,
+            RepoKind::Stable => &mut self.stable,
+            RepoKind::PreStable => &mut self.pre_stable,
+            RepoKind::Ubuntu => &mut self.ubuntu,
+        }
+    }
 }
 
 // Uses a BTreeMap so it stays sorted
@@ -162,29 +196,15 @@ async fn apt_infos() -> Result<AptInfos> {
                     let Some(version) = source.version else {
                         continue;
                     };
-                    let apt_version = || {
-                        AptVersion {
-                            repo_kind,
-                            suite,
-                            //TODO: do not clone component
-                            component: component.clone(),
-                            version: version.clone(),
-                            directory: source.directory.clone(),
-                            errors: Vec::new(),
-                        }
+                    let apt_version = || AptVersion {
+                        repo_kind,
+                        codename: *codename,
+                        version: version.clone(),
+                        directory: source.directory.clone(),
+                        errors: RefCell::new(Vec::new()),
                     };
                     let entry = apt_infos.entry((package, *codename));
                     match repo_kind {
-                        RepoKind::Release => {
-                            let apt_info = entry.or_default();
-                            assert!(apt_info.release.is_none());
-                            apt_info.release = Some(apt_version());
-                        }
-                        RepoKind::Staging => {
-                            let apt_info = entry.or_default();
-                            assert!(apt_info.staging.is_none());
-                            apt_info.staging = Some(apt_version());
-                        }
                         RepoKind::Ubuntu => {
                             // Only insert Ubuntu versions if a Pop version is found
                             entry.and_modify(|apt_info| match &apt_info.ubuntu {
@@ -200,6 +220,12 @@ async fn apt_infos() -> Result<AptInfos> {
                                 }
                             });
                         }
+                        _ => {
+                            let apt_info = entry.or_default();
+                            let version = apt_info.version_mut(repo_kind);
+                            assert!(version.is_none());
+                            *version = Some(apt_version());
+                        }
                     }
                 }
                 for (arch, packages_task) in arch_tasks {
@@ -213,32 +239,25 @@ async fn apt_infos() -> Result<AptInfos> {
     }
 
     // Calculate errors
-    for ((package, codename), apt_info) in apt_infos.iter_mut() {
-        if let Some(release) = &mut apt_info.release {
-            if apt_info.staging.is_none() {
-                release.errors.push("In release but not staging");
-            }
-            if let Some(ubuntu) = &apt_info.ubuntu {
-                if let std::cmp::Ordering::Greater =
-                    deb_version::compare_versions(&ubuntu.version, &release.version)
-                {
-                    release.errors.push("Older than Ubuntu");
-                }
-            }
-        }
-        if let Some(staging) = &mut apt_info.staging {
-            if let Some(release) = &apt_info.release {
-                if let std::cmp::Ordering::Greater =
-                    deb_version::compare_versions(&release.version, &staging.version)
-                {
-                    staging.errors.push("Older than release");
-                }
-            }
-            if let Some(ubuntu) = &apt_info.ubuntu {
-                if let std::cmp::Ordering::Greater =
-                    deb_version::compare_versions(&ubuntu.version, &staging.version)
-                {
-                    staging.errors.push("Older than Ubuntu");
+    for ((_package, _codename), apt_info) in apt_infos.iter() {
+        for repo_kind in RepoKind::all() {
+            for older_kind in repo_kind.must_be_newer_than() {
+                if let Some(older_version) = apt_info.version(older_kind) {
+                    if let Some(version) = apt_info.version(repo_kind) {
+                        if let std::cmp::Ordering::Less =
+                            deb_version::compare_versions(&version.version, &older_version.version)
+                        {
+                            version
+                                .errors
+                                .borrow_mut()
+                                .push(format!("Older than {}", older_kind.as_str()));
+                        }
+                    } else if !matches!(older_kind, RepoKind::Ubuntu) {
+                        older_version
+                            .errors
+                            .borrow_mut()
+                            .push(format!("Not in {}", repo_kind.as_str()));
+                    }
                 }
             }
         }
@@ -263,9 +282,7 @@ async fn main() -> Result<()> {
 <title>Poparazzi</title>
 <script src='https://code.jquery.com/jquery-4.0.0.min.js' integrity='sha256-OaVG6prZf4v69dPg6PhVattBXkcOWQB62pdZ3ORyrao=' crossorigin='anonymous'></script>
 <link rel='stylesheet' type='text/css' href='https://cdn.datatables.net/2.3.7/css/dataTables.dataTables.min.css'>
-<link rel='stylesheet' type='text/css' href='https://cdn.datatables.net/responsive/3.0.8/css/responsive.dataTables.min.css'>
 <script type='text/javascript' src='https://cdn.datatables.net/2.3.7/js/dataTables.min.js'></script>
-<script type='text/javascript' src='https://cdn.datatables.net/responsive/3.0.8/js/dataTables.responsive.min.js'></script>
 <style>
 td.error {
     background-color: #800000
@@ -279,13 +296,21 @@ function onload(){
             [1, 'asc'],
             [2, 'asc']
         ],
-        paging: false,
-        responsive: true
+        paging: false
     });
 }
 </script>
 </head>
 <body onload='onload()'>"#
+    )?;
+
+    writeln!(
+        html,
+        "<h4>Generated by <a href='https://github.com/pop-os/poparazzi'>Poparazzi</a> at {}</h4>",
+        encode_text(&format!(
+            "{}",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z")
+        ))
     )?;
 
     //TODO: why is this required?
@@ -309,7 +334,7 @@ function onload(){
         ),
         ("PRs pending merge", "review:approved"),
     ] {
-        let filter = format!("is:open is:pr archived:false user:pop-os {}", filter);
+        let filter = format!("is:open is:pr archived:false user:{GITHUB_ORG} {filter}");
         let url = format!(
             "https://github.com/pulls?q={}",
             urlencoding::encode(&filter)
@@ -345,18 +370,23 @@ function onload(){
     writeln!(html, "<th>Errors</th>")?;
     writeln!(html, "<th>Source</th>")?;
     writeln!(html, "<th>Codename</th>")?;
-    writeln!(html, "<th>Release</th>")?;
-    writeln!(html, "<th>Staging</th>")?;
-    writeln!(html, "<th>Ubuntu</th>")?;
+    for repo_kind in RepoKind::all() {
+        writeln!(
+            html,
+            "<th><a href='{}'>{}</a></th>",
+            repo_kind.url(),
+            encode_text(repo_kind.as_str())
+        )?;
+    }
     writeln!(html, "</tr>")?;
     writeln!(html, "</thead>")?;
     writeln!(html, "<tbody>")?;
     for ((package, codename), apt_info) in apt_infos.iter() {
         writeln!(html, "<tr>")?;
         let mut errors = 0;
-        for version_opt in &[&apt_info.release, &apt_info.staging, &apt_info.ubuntu] {
-            if let Some(version) = version_opt {
-                errors += version.errors.len();
+        for repo_kind in RepoKind::all() {
+            if let Some(version) = apt_info.version(repo_kind) {
+                errors += version.errors.borrow().len();
             }
         }
         if errors > 0 {
@@ -366,8 +396,8 @@ function onload(){
         }
         writeln!(html, "<td>{}</td>", encode_text(&package))?;
         writeln!(html, "<td>{}</td>", encode_text(codename.as_str()))?;
-        for version_opt in &[&apt_info.release, &apt_info.staging, &apt_info.ubuntu] {
-            if let Some(version) = version_opt {
+        for repo_kind in RepoKind::all() {
+            if let Some(version) = apt_info.version(repo_kind) {
                 version.html_cell(&mut html, package)?;
             } else {
                 writeln!(html, "<td>None</td>",)?;

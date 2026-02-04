@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1"
 async-compression = { version = "0.4", features = ["gzip", "futures-io"] }
+chrono = "0.4"
 deb-control-codec = "1.0.1"
 deb-version = "0.1"
 env_logger = "0.11"

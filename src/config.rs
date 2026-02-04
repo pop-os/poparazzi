@@ -88,18 +88,54 @@ impl fmt::Display for Arch {
 pub enum RepoKind {
     Release,
     Staging,
+    //TODO: ReleaseUbuntu,
+    StagingUbuntu,
+    Stable,
+    PreStable,
     Ubuntu,
 }
 
 impl RepoKind {
     pub fn all() -> Vec<Self> {
-        vec![Self::Release, Self::Staging, Self::Ubuntu]
+        vec![
+            Self::Release,
+            Self::Staging,
+            Self::StagingUbuntu,
+            Self::Stable,
+            Self::PreStable,
+            Self::Ubuntu,
+        ]
+    }
+
+    pub fn must_be_newer_than(&self) -> Vec<Self> {
+        match self {
+            Self::Release => vec![Self::Ubuntu],
+            Self::Staging => vec![Self::Release, Self::Ubuntu],
+            Self::StagingUbuntu => vec![Self::PreStable, Self::Stable, Self::Ubuntu],
+            Self::Stable => vec![Self::Ubuntu],
+            Self::PreStable => vec![Self::Stable, Self::Ubuntu],
+            Self::Ubuntu => vec![],
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Release => "Release",
+            Self::Staging => "Staging",
+            Self::StagingUbuntu => "Staging (Ubuntu)",
+            Self::Stable => "Stable (PPA)",
+            Self::PreStable => "Pre Stable (PPA)",
+            Self::Ubuntu => "Ubuntu",
+        }
     }
 
     pub fn url(&self) -> url::Url {
         url::Url::parse(match self {
             Self::Release => "https://apt.pop-os.org/release/",
             Self::Staging => "https://apt.pop-os.org/staging/master/",
+            Self::StagingUbuntu => "https://apt.pop-os.org/staging-ubuntu/master/",
+            Self::Stable => "https://ppa.launchpadcontent.net/system76-dev/stable/ubuntu/",
+            Self::PreStable => "https://ppa.launchpadcontent.net/system76-dev/pre-stable/ubuntu/",
             Self::Ubuntu => "https://apt.pop-os.org/ubuntu/",
         })
         .unwrap()

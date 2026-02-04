@@ -1,9 +1,7 @@
 use anyhow::{Result, anyhow};
 use async_compression::futures::bufread::GzipDecoder;
 use deb_control_codec::{asynchronous_codec::FramedRead, prelude::*};
-use futures::io::AllowStdIo;
 use futures_util::{StreamExt, TryStreamExt};
-use std::{fmt::Write, io::Cursor};
 use url::Url;
 
 fn parse_array(entry: Entry, value: &mut Option<Vec<String>>) -> Result<()> {
