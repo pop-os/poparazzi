@@ -55,7 +55,12 @@ impl AptVersion {
             _ => self.github_commit(),
         };
         if let Some(url) = url_opt {
-            writeln!(html, "<a href='{url}'>{}</a>", encode_text(&self.version))?;
+            writeln!(
+                html,
+                "<a href='{url}'>{}</a>",
+                // Allows version to line break at tildes
+                encode_text(&self.version).replace("~", "~&#8203;")
+            )?;
         } else {
             writeln!(html, "{}", encode_text(&self.version))?;
         }
