@@ -29,7 +29,9 @@ impl AptVersion {
         let _codename = parts.next()?;
         let repo = parts.next()?;
         let commit = parts.next()?;
-        Some(format!("https://github.com/pop-os/{repo}/commit/{commit}"))
+        Some(format!(
+            "https://github.com/{GITHUB_ORG}/{repo}/commit/{commit}"
+        ))
     }
 
     fn html_cell<W: Write>(&self, html: &mut W, package: &str) -> Result<()> {
@@ -286,6 +288,56 @@ function onload(){
 <body onload='onload()'>"#
     )?;
 
+    //TODO: why is this required?
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+    let token =
+        fs::read_to_string(".github_token").context("Put your Github token in .github_token")?;
+    let token = token.trim();
+    let octocrab = Octocrab::builder().personal_token(token).build()?;
+
+    writeln!(html, "<table width='100%'><tr>")?;
+    for (name, filter) in &[
+        (
+            "PRs pending engineering review",
+            "-review:changes_requested team-review-requested:pop-os/engineering",
+        ),
+        (
+            "PRs pending QA review",
+            "-review:changes_requested team-review-requested:pop-os/quality-assurance",
+        ),
+        ("PRs pending merge", "review:approved"),
+    ] {
+        let filter = format!("is:open is:pr archived:false user:pop-os {}", filter);
+        let url = format!(
+            "https://github.com/pulls?q={}",
+            urlencoding::encode(&filter)
+        );
+        let page = octocrab
+            .search()
+            .issues_and_pull_requests(&filter)
+            .send()
+            .await?;
+        log::info!("{name}: {}", page.total_count.unwrap_or(0));
+        writeln!(
+            html,
+            "<td><a href='{}'>{}: {}</a></td>",
+            url,
+            encode_text(name),
+            page.total_count.unwrap_or(0)
+        )?;
+        /*TODO: parse PR info?
+        let stream = page
+            .into_stream(&octocrab);
+        pin!(stream);
+        while let Some(pr) = stream.try_next().await? {
+            println!(" - {}: {}", pr.html_url, pr.title);
+        }
+        */
+    }
+    writeln!(html, "</tr></table>")?;
+
     let apt_infos = apt_infos().await?;
     writeln!(html, "<table id='table' class='display compact'>")?;
     writeln!(html, "<thead>")?;
@@ -331,34 +383,6 @@ function onload(){
         r#"</body>
 </html>"#
     )?;
-
-    /*
-    let token =
-        fs::read_to_string(".github_token").context("Put your Github token in .github_token")?;
-    let token = token.trim();
-    let octocrab = Octocrab::builder().personal_token(token).build()?;
-
-    let mut repos = Vec::new();
-    {
-        log::info!("retrieving github repositories");
-        let stream = octocrab
-            .orgs(GITHUB_ORG)
-            .list_repos()
-            .repo_type(octocrab::params::repos::Type::Public)
-            .send()
-            .await?
-            .into_stream(&octocrab);
-        pin!(stream);
-        while let Some(repo) = stream.try_next().await? {
-            repos.push(Repository { name: repo.name });
-        }
-        repos.sort_by_key(|repo| repo.name.clone());
-    }
-
-    for repo in repos.iter() {
-        println!("{:?}", repo);
-    }
-    */
 
     Ok(())
 }
