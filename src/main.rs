@@ -369,10 +369,18 @@ function onload(){
     writeln!(html, "</tr></table>")?;
 
     let apt_infos = apt_infos().await?;
+    let mut total_errors = 0;
+    for (_, apt_info) in apt_infos.iter() {
+        for repo_kind in RepoKind::all() {
+            if let Some(version) = apt_info.version(repo_kind) {
+                total_errors += version.errors.borrow().len();
+            }
+        }
+    }
     writeln!(html, "<table id='table' class='display compact'>")?;
     writeln!(html, "<thead>")?;
     writeln!(html, "<tr>")?;
-    writeln!(html, "<th>Errors</th>")?;
+    writeln!(html, "<th>Errors ({})</th>", total_errors)?;
     writeln!(html, "<th>Source</th>")?;
     writeln!(html, "<th>Codename</th>")?;
     for repo_kind in RepoKind::all() {
@@ -386,7 +394,6 @@ function onload(){
     writeln!(html, "</tr>")?;
     writeln!(html, "</thead>")?;
     writeln!(html, "<tbody>")?;
-    let mut total_errors = 0;
     for ((package, codename), apt_info) in apt_infos.iter() {
         writeln!(html, "<tr>")?;
         let mut errors = 0;
@@ -400,7 +407,6 @@ function onload(){
         } else {
             writeln!(html, "<td>{}</td>", errors)?;
         }
-        total_errors += errors;
         writeln!(html, "<td>{}</td>", encode_text(&package))?;
         writeln!(html, "<td>{}</td>", encode_text(codename.as_str()))?;
         for repo_kind in RepoKind::all() {
