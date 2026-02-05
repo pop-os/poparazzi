@@ -2,6 +2,29 @@ use std::fmt;
 
 pub const GITHUB_ORG: &'static str = "pop-os";
 
+// Filter for all pop-os PRs that are open and not drafts
+pub const GITHUB_PR_FILTER_BASE: &'static str =
+    "is:open is:pr archived:false draft:false user:pop-os";
+pub const GITHUB_PR_FILTERS: &'static [(&'static str, &'static str)] = &[
+    (
+        "PRs pending engineering assignment",
+        "review:none -team-review-requested:pop-os/engineering",
+    ),
+    (
+        "PRs pending QA assignment",
+        "review:none -team-review-requested:pop-os/quality-assurance",
+    ),
+    (
+        "PRs pending engineering review",
+        "-review:changes_requested team-review-requested:pop-os/engineering",
+    ),
+    (
+        "PRs pending QA review",
+        "-review:changes_requested team-review-requested:pop-os/quality-assurance",
+    ),
+    ("PRs pending merge", "review:approved"),
+];
+
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Codename {
     Jammy,

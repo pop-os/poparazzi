@@ -328,18 +328,8 @@ function onload(){
     let octocrab = Octocrab::builder().personal_token(token).build()?;
 
     writeln!(html, "<table width='100%'><tr>")?;
-    for (name, filter) in &[
-        (
-            "PRs pending engineering review",
-            "-review:changes_requested team-review-requested:pop-os/engineering",
-        ),
-        (
-            "PRs pending QA review",
-            "-review:changes_requested team-review-requested:pop-os/quality-assurance",
-        ),
-        ("PRs pending merge", "review:approved"),
-    ] {
-        let filter = format!("is:open is:pr archived:false user:{GITHUB_ORG} {filter}");
+    for (name, filter) in GITHUB_PR_FILTERS {
+        let filter = format!("{GITHUB_PR_FILTER_BASE} {filter}");
         let url = format!(
             "https://github.com/pulls?q={}",
             urlencoding::encode(&filter)
