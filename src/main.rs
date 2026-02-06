@@ -59,7 +59,10 @@ impl AptVersion {
                 html,
                 "<a href='{url}'>{}</a>",
                 // Allows version to line break at punctuation
-                encode_text(&self.version).replace("~", "~&#8203;").replace("-", "-&#8203;").replace("+", "+&#8203;");
+                encode_text(&self.version)
+                    .replace("~", "~&#8203;")
+                    .replace("-", "-&#8203;")
+                    .replace("+", "+&#8203;")
             )?;
         } else {
             writeln!(html, "{}", encode_text(&self.version))?;
@@ -367,7 +370,10 @@ function onload(){
             }
         }
     }
-    writeln!(html, "<table id='table' class='display compact' style='overflow-wrap: anywhere'>")?;
+    writeln!(
+        html,
+        "<table id='table' class='display compact' style='overflow-wrap: anywhere'>"
+    )?;
     writeln!(html, "<thead>")?;
     writeln!(html, "<tr>")?;
     writeln!(html, "<th>Errors ({})</th>", total_errors)?;
