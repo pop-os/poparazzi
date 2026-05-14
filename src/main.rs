@@ -79,6 +79,7 @@ impl AptVersion {
 pub struct AptInfo {
     release: Option<AptVersion>,
     staging: Option<AptVersion>,
+    release_ubuntu: Option<AptVersion>,
     staging_ubuntu: Option<AptVersion>,
     stable: Option<AptVersion>,
     pre_stable: Option<AptVersion>,
@@ -90,6 +91,7 @@ impl AptInfo {
         match repo_kind {
             RepoKind::Release => &self.release,
             RepoKind::Staging => &self.staging,
+            RepoKind::ReleaseUbuntu => &self.release_ubuntu,
             RepoKind::StagingUbuntu => &self.staging_ubuntu,
             RepoKind::Stable => &self.stable,
             RepoKind::PreStable => &self.pre_stable,
@@ -101,6 +103,7 @@ impl AptInfo {
         match repo_kind {
             RepoKind::Release => &mut self.release,
             RepoKind::Staging => &mut self.staging,
+            RepoKind::ReleaseUbuntu => &mut self.release_ubuntu,
             RepoKind::StagingUbuntu => &mut self.staging_ubuntu,
             RepoKind::Stable => &mut self.stable,
             RepoKind::PreStable => &mut self.pre_stable,
