@@ -125,8 +125,10 @@ impl RepoKind {
             Self::Staging,
             Self::ReleaseUbuntu,
             Self::StagingUbuntu,
+            /* System76 PPAs are deprecated
             Self::Stable,
             Self::PreStable,
+            */
             Self::Ubuntu,
         ]
     }
@@ -136,7 +138,12 @@ impl RepoKind {
             Self::Release => vec![Self::Ubuntu],
             Self::Staging => vec![Self::Release, Self::Ubuntu],
             Self::ReleaseUbuntu => vec![Self::Stable, Self::Ubuntu],
-            Self::StagingUbuntu => vec![Self::ReleaseUbuntu, Self::PreStable, Self::Stable, Self::Ubuntu],
+            Self::StagingUbuntu => vec![
+                Self::ReleaseUbuntu,
+                Self::PreStable,
+                Self::Stable,
+                Self::Ubuntu,
+            ],
             Self::Stable => vec![Self::Ubuntu],
             Self::PreStable => vec![Self::Stable, Self::Ubuntu],
             Self::Ubuntu => vec![],
