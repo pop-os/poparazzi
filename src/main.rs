@@ -214,7 +214,7 @@ async fn apt_infos() -> Result<AptInfos> {
                         directory: source.directory.clone(),
                         errors: RefCell::new(Vec::new()),
                     };
-                    let entry = apt_infos.entry((package, *codename));
+                    let entry = apt_infos.entry((package.clone(), *codename));
                     match repo_kind {
                         RepoKind::Ubuntu => {
                             // Only insert Ubuntu versions if a Pop version is found
@@ -234,7 +234,14 @@ async fn apt_infos() -> Result<AptInfos> {
                         _ => {
                             let apt_info = entry.or_default();
                             let version = apt_info.version_mut(repo_kind);
-                            assert!(version.is_none());
+                            assert!(
+                                version.is_none(),
+                                "{} on {} has multiple versions: {:#?} and {:#?}",
+                                package,
+                                codename,
+                                version,
+                                apt_version()
+                            );
                             *version = Some(apt_version());
                         }
                     }
